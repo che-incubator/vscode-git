@@ -386,7 +386,7 @@ export class CommandCenter {
 	}
 
 	@command('git.clone')
-	async clone(url?: string): Promise<void> {
+	async clone(url?: string, folder?: string, branch?: string): Promise<void> {
 		if (!url) {
 			url = await window.showInputBox({
 				prompt: localize('repourl', "Repository URL"),
@@ -408,25 +408,37 @@ export class CommandCenter {
 		let defaultCloneDirectory = config.get<string>('defaultCloneDirectory') || os.homedir();
 		defaultCloneDirectory = defaultCloneDirectory.replace(/^~/, os.homedir());
 
-		const uris = await window.showOpenDialog({
-			canSelectFiles: false,
-			canSelectFolders: true,
-			canSelectMany: false,
-			defaultUri: Uri.file(defaultCloneDirectory),
-			openLabel: localize('selectFolder', "Select Repository Location")
-		});
+		let uri: Uri;
+		if (folder) {
+			uri = Uri.file(folder);
+		} else {
+			const folders = workspace.workspaceFolders;
+			if (folders && folders[0]) {
+				const repoName = decodeURI(url).replace(/^.*\//, '').replace(/\.git$/, '') || 'repository';
+				uri = Uri.parse(path.join(folders[0].uri.fsPath, repoName));
+			} else {
+				const uris = await window.showOpenDialog({
+					canSelectFiles: false,
+					canSelectFolders: true,
+					canSelectMany: false,
+					defaultUri: Uri.file(defaultCloneDirectory),
+					openLabel: localize('selectFolder', "Select Repository Location")
+				});
 
-		if (!uris || uris.length === 0) {
-			/* __GDPR__
-				"clone" : {
-					"outcome" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+				if (!uris || uris.length === 0) {
+					/* __GDPR__
+                        "clone" : {
+                            "outcome" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+                        }
+                    */
+					this.telemetryReporter.sendTelemetryEvent('clone', { outcome: 'no_directory' });
+					return;
 				}
-			*/
-			this.telemetryReporter.sendTelemetryEvent('clone', { outcome: 'no_directory' });
-			return;
+
+				uri = uris[0];
+			}
 		}
 
-		const uri = uris[0];
 		const parentPath = uri.fsPath;
 
 		try {
@@ -436,40 +448,16 @@ export class CommandCenter {
 				cancellable: true
 			};
 
-			const repositoryPath = await window.withProgress(
+			await window.withProgress(
 				opts,
-				(_, token) => this.git.clone(url!, parentPath, token)
-			);
-
-			const choices = [];
-			let message = localize('proposeopen', "Would you like to open the cloned repository?");
-			const open = localize('openrepo', "Open Repository");
-			choices.push(open);
-
-			const addToWorkspace = localize('add', "Add to Workspace");
-			if (workspace.workspaceFolders) {
-				message = localize('proposeopen2', "Would you like to open the cloned repository, or add it to the current workspace?");
-				choices.push(addToWorkspace);
-			}
-
-			const result = await window.showInformationMessage(message, ...choices);
-
-			const openFolder = result === open;
-			/* __GDPR__
-				"clone" : {
-					"outcome" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
-					"openFolder": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true }
+				async (_, token) => {
+					const result = await this.git.clone(url!, parentPath, token);
+					if (branch) {
+						await this.git.exec(parentPath, ['checkout', branch], { cancellationToken: token });
+					}
+					return result;
 				}
-			*/
-			this.telemetryReporter.sendTelemetryEvent('clone', { outcome: 'success' }, { openFolder: openFolder ? 1 : 0 });
-
-			const uri = Uri.file(repositoryPath);
-
-			if (openFolder) {
-				commands.executeCommand('vscode.openFolder', uri);
-			} else if (result === addToWorkspace) {
-				workspace.updateWorkspaceFolders(workspace.workspaceFolders!.length, 0, { uri });
-			}
+			);
 		} catch (err) {
 			if (/already exists and is not an empty directory/.test(err && err.stderr || '')) {
 				/* __GDPR__
